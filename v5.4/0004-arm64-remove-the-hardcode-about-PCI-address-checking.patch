@@ -1,0 +1,139 @@
+From f11aba46312c61c045a4b479f6fd2e9442a3a36e Mon Sep 17 00:00:00 2001
+From: Huang Shijie <shijie@os.amperecomputing.com>
+Date: Fri, 8 Apr 2022 20:43:33 +0000
+Subject: [PATCH 04/10] arm64: remove the hardcode about PCI address checking
+
+Copy name in find_next_iomem_res() for checking the PCI
+address.
+
+Signed-off-by: Huang Shijie <shijie@os.amperecomputing.com>
+---
+ arch/arm64/include/asm/pgtable.h |  7 ++----
+ arch/arm64/mm/ioremap.c          |  4 ++-
+ include/linux/pci.h              |  3 +++
+ kernel/resource.c                | 43 ++++++++++++++++++++++++++++++++
+ 4 files changed, 51 insertions(+), 6 deletions(-)
+
+diff --git a/arch/arm64/include/asm/pgtable.h b/arch/arm64/include/asm/pgtable.h
+index 6b8884344fce..82baddf80fff 100644
+--- a/arch/arm64/include/asm/pgtable.h
++++ b/arch/arm64/include/asm/pgtable.h
+@@ -438,7 +438,7 @@ static inline pmd_t pmd_mkdevmap(pmd_t pmd)
+ 			PTE_ATTRINDX(MT_NORMAL_NC) | PTE_PXN | PTE_UXN)
+ 
+ #ifdef CONFIG_ALTRA_ERRATUM_82288
+-extern bool have_altra_erratum_82288;
++extern bool range_is_pci(phys_addr_t, size_t);
+ #endif
+ 
+ static inline pte_t pte_mkspecial(pte_t pte)
+@@ -447,10 +447,7 @@ static inline pte_t pte_mkspecial(pte_t pte)
+ 	phys_addr_t phys = __pte_to_phys(pte);
+ 	pgprot_t prot = __pgprot(pte_val(pte) & ~PTE_ADDR_MASK);
+ 
+-	if (unlikely(have_altra_erratum_82288) &&
+-	    (phys < 0x80000000 ||
+-	     (phys >= 0x200000000000 && phys < 0x400000000000) ||
+-	     (phys >= 0x600000000000 && phys < 0x800000000000))) {
++	if (range_is_pci(phys, PAGE_SIZE)) {
+ 		pte = __pte(__phys_to_pte_val(phys) | pgprot_val(pgprot_device(prot)));
+ 	}
+ #endif
+diff --git a/arch/arm64/mm/ioremap.c b/arch/arm64/mm/ioremap.c
+index 9d7042f0ab42..8658cc2fb58e 100644
+--- a/arch/arm64/mm/ioremap.c
++++ b/arch/arm64/mm/ioremap.c
+@@ -14,6 +14,7 @@
+ #include <linux/vmalloc.h>
+ #include <linux/io.h>
+ #include <linux/memblock.h>
++#include <linux/pci.h>
+ 
+ #include <asm/fixmap.h>
+ #include <asm/tlbflush.h>
+@@ -68,7 +69,8 @@ static void __iomem *__ioremap_caller(phys_addr_t phys_addr, size_t size,
+ 	area->phys_addr = phys_addr;
+ 
+ #ifdef CONFIG_ALTRA_ERRATUM_82288
+-	if (unlikely(have_altra_erratum_82288 && is_altra_pci(phys_addr, size)))
++	if ((pgprot_val(prot) != pgprot_val(pgprot_device(prot))) &&
++			range_is_pci(phys_addr, size))
+ 		prot = pgprot_device(prot);
+ #endif
+ 
+diff --git a/include/linux/pci.h b/include/linux/pci.h
+index fc343d123127..5820c5b17544 100644
+--- a/include/linux/pci.h
++++ b/include/linux/pci.h
+@@ -2406,4 +2406,7 @@ void pci_uevent_ers(struct pci_dev *pdev, enum  pci_ers_result err_type);
+ #define pci_info_ratelimited(pdev, fmt, arg...) \
+ 	dev_info_ratelimited(&(pdev)->dev, fmt, ##arg)
+ 
++#ifdef CONFIG_ALTRA_ERRATUM_82288
++extern bool range_is_pci(phys_addr_t phys_addr, size_t size);
++#endif
+ #endif /* LINUX_PCI_H */
+diff --git a/kernel/resource.c b/kernel/resource.c
+index 841737bbda9e..62326c4b144f 100644
+--- a/kernel/resource.c
++++ b/kernel/resource.c
+@@ -386,6 +386,7 @@ static int find_next_iomem_res(resource_size_t start, resource_size_t end,
+ 		res->end = min(end, p->end);
+ 		res->flags = p->flags;
+ 		res->desc = p->desc;
++		res->name = p->name;
+ 	}
+ 
+ 	read_unlock(&resource_lock);
+@@ -513,6 +514,48 @@ int __weak page_is_ram(unsigned long pfn)
+ }
+ EXPORT_SYMBOL_GPL(page_is_ram);
+ 
++#ifdef CONFIG_ALTRA_ERRATUM_82288
++/* Return 0 on success, else return 1 */
++static int pci_addr_check(struct resource *r, void *p)
++{
++	if (!r->name)
++		return 1;
++
++	if (strlen(r->name) <= 2)
++		return 1;
++
++	if (memcmp(r->name, "PCI", 3))
++		return 1;
++
++	/* Success */
++	return 0;
++}
++
++bool range_is_pci(phys_addr_t phys_addr, size_t size)
++{
++	u64 start, end;
++	int ret;
++
++	start = phys_addr;
++	end = phys_addr + size;
++
++	/* Check the 32bit */
++	ret = walk_iomem_res_desc(IORES_DESC_NONE, IORESOURCE_MEM,
++			start, end, NULL, pci_addr_check);
++	if (!ret)
++		return true;
++
++	/* Check the 64bit */
++	ret = walk_iomem_res_desc(IORES_DESC_NONE, IORESOURCE_MEM_64,
++			start, end, NULL, pci_addr_check);
++	if (!ret)
++		return true;
++
++	return false;
++}
++EXPORT_SYMBOL_GPL(range_is_pci);
++#endif
++
+ /**
+  * region_intersects() - determine intersection of region with known resources
+  * @start: region start address
+-- 
+2.39.3
+

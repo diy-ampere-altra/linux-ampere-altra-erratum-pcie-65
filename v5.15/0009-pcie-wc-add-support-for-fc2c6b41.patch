@@ -1,0 +1,119 @@
+From e800029d0b0a66336b0c54937f494cfded032326 Mon Sep 17 00:00:00 2001
+From: Huang Shijie <shijie@os.amperecomputing.com>
+Date: Wed, 5 Jul 2023 09:30:43 +0800
+Subject: [PATCH 09/10] pcie-wc: add support for fc2c6b41
+
+Signed-off-by: Huang Shijie <shijie@os.amperecomputing.com>
+---
+ arch/arm64/mm/pcie_unalign_access.c | 81 ++++++++++++++++++++++++++++-
+ 1 file changed, 80 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/mm/pcie_unalign_access.c b/arch/arm64/mm/pcie_unalign_access.c
+index 52475f910154..639c6a48ddee 100644
+--- a/arch/arm64/mm/pcie_unalign_access.c
++++ b/arch/arm64/mm/pcie_unalign_access.c
+@@ -144,6 +144,84 @@ static int ldst_type_imm(struct ldst_filter *f, u32 insn, struct pt_regs *regs)
+ 		return align_ldst_imm_new(insn, regs);
+ }
+ 
++/* handle for fc2c6b41 */
++static int align_ldst_regoff_simdfp_new(u32 insn, struct pt_regs *regs)
++{
++	const u32 SIZE = GENMASK(31, 30);
++	const u32 OPC = GENMASK(23, 22);
++	const u32 OPTION = GENMASK(15, 13);
++	const u32 S = BIT(12);
++
++	u32 size = FIELD_GET(SIZE, insn);
++	u32 opc = FIELD_GET(OPC, insn);
++	u32 option = FIELD_GET(OPTION, insn);
++	u32 s = FIELD_GET(S, insn);
++	int scale = (opc & 0x2) << 1 | size;
++	int extend_len = (option & 0x1) ? 64 : 32;
++	bool extend_unsigned = !(option & 0x4);
++	int shift = s ? scale : 0;
++
++	int n = aarch64_insn_decode_register(AARCH64_INSN_REGTYPE_RN, insn);
++	int t = aarch64_insn_decode_register(AARCH64_INSN_REGTYPE_RT, insn);
++	int m = aarch64_insn_decode_register(AARCH64_INSN_REGTYPE_RM, insn);
++	bool is_store = !(opc & BIT(0));
++	int datasize;
++	u64 offset;
++	u64 address;
++	u64 data_d0, data_d1;
++
++	/*
++	if ((opc & 0x2) == 0)
++		return 1;
++	*/
++
++	datasize = 8 << scale;
++
++	if (n == t && n != 31)
++		return 1;
++
++	offset = pt_regs_read_reg(regs, m);
++	if (extend_len == 32) {
++		offset &= (u32)~0;
++		if (!extend_unsigned)
++			sign_extend64(offset, 31);
++	}
++	offset <<= shift;
++
++	address = regs_get_register(regs, n << 3) + offset;
++
++	if (is_store) {
++		data_d0 = get_vn_dt(t, 0);
++		if (datasize == 128) {
++			data_d1 = get_vn_dt(t, 1);
++			if (align_store(address, 8, data_d0) ||
++			    align_store(address + 8, 8, data_d1))
++				return 1;
++		} else if (datasize == 64) {
++			/* fc2c6b41 should come here. */
++			if (align_store(address, 8, data_d0))
++				return 1;
++		} else {
++			if (align_store(address, datasize / 8, data_d0))
++				return 1;
++		}
++	} else {
++		if (datasize == 128) {
++			if (align_load(address, 8, &data_d0) ||
++			    align_load(address + 8, 8, &data_d1))
++				return 1;
++		} else {
++			if (align_load(address, datasize / 8, &data_d0))
++				return 1;
++			data_d1 = 0;
++		}
++		set_vn_dt(t, 0, data_d0);
++		set_vn_dt(t, 1, data_d1);
++	}
++
++	return 0;
++}
++
+ /*
+  * |------+-----+-----+--------+-----+---------------------------------------|
+  * | op0  | op1 | op2 |    op3 | op4 |                                       |
+@@ -155,7 +233,7 @@ static int ldst_type_regoff(struct ldst_filter *f, u32 insn, struct pt_regs *reg
+ {
+ 	/* The bit 26 is used for SIMD only, please see the spec */
+ 	if (insn & BIT(26))
+-		return align_ldst_regoff_simdfp(insn, regs);
++		return align_ldst_regoff_simdfp_new(insn, regs);
+ 	else
+ 		return align_ldst_regoff(insn, regs);
+ }
+@@ -625,6 +703,7 @@ static int align_ldst_new(u32 insn, struct pt_regs *regs)
+ 		if ((f->mask & insn) == f->arm_code) {
+ 			int ret = f->handler(f, insn, regs);
+ 
++			pr_debug("handling insn:%x, (%s)\n", insn, f->name);
+ 			if (ret)
+ 				pr_info("Failed in handling insn:%x, (%s)\n", insn, f->name);
+ 			return ret;
+-- 
+2.39.3
+

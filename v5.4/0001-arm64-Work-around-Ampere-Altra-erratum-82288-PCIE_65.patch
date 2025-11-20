@@ -1,0 +1,173 @@
+From 8332152888aa03a14bef6e8d670b9b1a22c7398e Mon Sep 17 00:00:00 2001
+From: D Scott Phillips <scott@os.amperecomputing.com>
+Date: Fri, 13 Nov 2020 08:25:23 -0800
+Subject: [PATCH 01/10] arm64: Work around Ampere Altra erratum #82288 PCIE_65
+
+Altra's PCIe controller may generate incorrect addresses when receiving
+writes from the CPU with a discontiguous set of byte enables. Attempt to
+work around this by handing out Device-nGnRE maps instead of Normal
+Non-cacheable maps for PCIe memory areas.
+
+Signed-off-by: D Scott Phillips <scott@os.amperecomputing.com>
+---
+ Documentation/arm64/silicon-errata.rst |  3 +++
+ arch/arm64/Kconfig                     |  9 +++++++++
+ arch/arm64/include/asm/pci.h           |  4 ++++
+ arch/arm64/include/asm/pgtable.h       | 26 +++++++++++++++++++++-----
+ arch/arm64/mm/ioremap.c                | 18 ++++++++++++++++++
+ drivers/pci/quirks.c                   | 10 ++++++++++
+ 6 files changed, 65 insertions(+), 5 deletions(-)
+
+diff --git a/Documentation/arm64/silicon-errata.rst b/Documentation/arm64/silicon-errata.rst
+index 59daa4c21816..13f595e6fe18 100644
+--- a/Documentation/arm64/silicon-errata.rst
++++ b/Documentation/arm64/silicon-errata.rst
+@@ -52,6 +52,9 @@ stable kernels.
+ | Allwinner      | A64/R18         | UNKNOWN1        | SUN50I_ERRATUM_UNKNOWN1     |
+ +----------------+-----------------+-----------------+-----------------------------+
+ +----------------+-----------------+-----------------+-----------------------------+
++| Ampere         | Altra           | #82288          | ALTRA_ERRATUM_82288         |
+++----------------+-----------------+-----------------+-----------------------------+
+++----------------+-----------------+-----------------+-----------------------------+
+ | ARM            | Cortex-A53      | #826319         | ARM64_ERRATUM_826319        |
+ +----------------+-----------------+-----------------+-----------------------------+
+ | ARM            | Cortex-A53      | #827319         | ARM64_ERRATUM_827319        |
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index a1a828ca188c..7873f70e2b49 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -322,6 +322,15 @@ menu "ARM errata workarounds via the alternatives framework"
+ config ARM64_WORKAROUND_CLEAN_CACHE
+ 	bool
+ 
++config ALTRA_ERRATUM_82288
++	bool "Ampere Altra: 82288: PCIE_65: PCIe Root Port outbound write combining issue"
++	default y
++	help
++	  This option adds an alternative code sequence to work around
++	  Ampere Altra erratum 82288.
++
++	  If unsure, say Y.
++
+ config ARM64_ERRATUM_826319
+ 	bool "Cortex-A53: 826319: System might deadlock if a write cannot complete until read data is accepted"
+ 	default y
+diff --git a/arch/arm64/include/asm/pci.h b/arch/arm64/include/asm/pci.h
+index 70b323cf8300..5e3770c2ebea 100644
+--- a/arch/arm64/include/asm/pci.h
++++ b/arch/arm64/include/asm/pci.h
+@@ -17,6 +17,10 @@
+ #define pcibios_assign_all_busses() \
+ 	(pci_has_flag(PCI_REASSIGN_ALL_BUS))
+ 
++#ifdef CONFIG_ALTRA_ERRATUM_82288
++extern bool __read_mostly have_altra_erratum_82288;
++#endif
++
+ #define ARCH_GENERIC_PCI_MMAP_RESOURCE	1
+ 
+ extern int isa_dma_bridge_buggy;
+diff --git a/arch/arm64/include/asm/pgtable.h b/arch/arm64/include/asm/pgtable.h
+index 3a057d427900..6b8884344fce 100644
+--- a/arch/arm64/include/asm/pgtable.h
++++ b/arch/arm64/include/asm/pgtable.h
+@@ -191,11 +191,6 @@ static inline pte_t pte_mkyoung(pte_t pte)
+ 	return set_pte_bit(pte, __pgprot(PTE_AF));
+ }
+ 
+-static inline pte_t pte_mkspecial(pte_t pte)
+-{
+-	return set_pte_bit(pte, __pgprot(PTE_SPECIAL));
+-}
+-
+ static inline pte_t pte_mkcont(pte_t pte)
+ {
+ 	pte = set_pte_bit(pte, __pgprot(PTE_CONT));
+@@ -442,6 +437,27 @@ static inline pmd_t pmd_mkdevmap(pmd_t pmd)
+ 	__pgprot_modify(prot, PTE_ATTRINDX_MASK, \
+ 			PTE_ATTRINDX(MT_NORMAL_NC) | PTE_PXN | PTE_UXN)
+ 
++#ifdef CONFIG_ALTRA_ERRATUM_82288
++extern bool have_altra_erratum_82288;
++#endif
++
++static inline pte_t pte_mkspecial(pte_t pte)
++{
++#ifdef CONFIG_ALTRA_ERRATUM_82288
++	phys_addr_t phys = __pte_to_phys(pte);
++	pgprot_t prot = __pgprot(pte_val(pte) & ~PTE_ADDR_MASK);
++
++	if (unlikely(have_altra_erratum_82288) &&
++	    (phys < 0x80000000 ||
++	     (phys >= 0x200000000000 && phys < 0x400000000000) ||
++	     (phys >= 0x600000000000 && phys < 0x800000000000))) {
++		pte = __pte(__phys_to_pte_val(phys) | pgprot_val(pgprot_device(prot)));
++	}
++#endif
++
++	return set_pte_bit(pte, __pgprot(PTE_SPECIAL));
++}
++
+ #define __HAVE_PHYS_MEM_ACCESS_PROT
+ struct file;
+ extern pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
+diff --git a/arch/arm64/mm/ioremap.c b/arch/arm64/mm/ioremap.c
+index 8dac7fcfb4bd..9d7042f0ab42 100644
+--- a/arch/arm64/mm/ioremap.c
++++ b/arch/arm64/mm/ioremap.c
+@@ -19,6 +19,19 @@
+ #include <asm/tlbflush.h>
+ #include <asm/pgalloc.h>
+ 
++#ifdef CONFIG_ALTRA_ERRATUM_82288
++bool have_altra_erratum_82288 __read_mostly;
++EXPORT_SYMBOL(have_altra_erratum_82288);
++
++static bool is_altra_pci(phys_addr_t phys_addr, size_t size)
++{
++	phys_addr_t end = phys_addr + size;
++	return (phys_addr < 0x80000000 ||
++		(end > 0x200000000000 && phys_addr < 0x400000000000) ||
++		(end > 0x600000000000 && phys_addr < 0x800000000000));
++}
++#endif
++
+ static void __iomem *__ioremap_caller(phys_addr_t phys_addr, size_t size,
+ 				      pgprot_t prot, void *caller)
+ {
+@@ -54,6 +67,11 @@ static void __iomem *__ioremap_caller(phys_addr_t phys_addr, size_t size,
+ 	addr = (unsigned long)area->addr;
+ 	area->phys_addr = phys_addr;
+ 
++#ifdef CONFIG_ALTRA_ERRATUM_82288
++	if (unlikely(have_altra_erratum_82288 && is_altra_pci(phys_addr, size)))
++		prot = pgprot_device(prot);
++#endif
++
+ 	err = ioremap_page_range(addr, addr + size, phys_addr, prot);
+ 	if (err) {
+ 		vunmap((void *)addr);
+diff --git a/drivers/pci/quirks.c b/drivers/pci/quirks.c
+index 2a4bc8df8563..431554ef8329 100644
+--- a/drivers/pci/quirks.c
++++ b/drivers/pci/quirks.c
+@@ -5774,6 +5774,16 @@ static void pci_fixup_no_pme(struct pci_dev *dev)
+ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_PERICOM, 0x400e, pci_fixup_no_pme);
+ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_PERICOM, 0x400f, pci_fixup_no_pme);
+ 
++
++#ifdef CONFIG_ALTRA_ERRATUM_82288
++static void quirk_altra_erratum_82288(struct pci_dev *dev)
++{
++	pr_info_once("Write combining PCI maps disabled due to hardware erratum\n");
++	have_altra_erratum_82288 = true;
++}
++DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMPERE, 0xe100, quirk_altra_erratum_82288);
++#endif
++
+ static void apex_pci_fixup_class(struct pci_dev *pdev)
+ {
+ 	pdev->class = (PCI_CLASS_SYSTEM_OTHER << 8) | pdev->class;
+-- 
+2.39.3
+

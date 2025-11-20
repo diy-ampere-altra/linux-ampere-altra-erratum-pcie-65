@@ -1,0 +1,25 @@
+From 53f5361543660651fa2ed6ac9deabfc98903a225 Mon Sep 17 00:00:00 2001
+From: davidz-ampere <>
+Date: Mon, 24 Mar 2025 22:52:47 -0400
+Subject: [PATCH 1/1] Fix load in align_ldst_regoff
+
+Data is not written back to the register and will cause data mismatch.
+---
+ arch/arm64/mm/fault.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/mm/fault.c b/arch/arm64/mm/fault.c
+index 8061203e5050..e931c47e4cb9 100644
+--- a/arch/arm64/mm/fault.c
++++ b/arch/arm64/mm/fault.c
+@@ -1060,6 +1060,7 @@ static int align_ldst_regoff(u32 insn, struct pt_regs *regs)
+ 			else
+ 				data = sign_extend64(data, datasize - 1);
+ 		}
++		pt_regs_write_reg(regs, t, data);
+ 	}
+ 
+ 	return 0;
+-- 
+2.27.0
+

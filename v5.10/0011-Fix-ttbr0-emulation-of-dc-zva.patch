@@ -1,0 +1,28 @@
+From 45cd67bdcf313147e4e91b1512e79cd4eb58f108 Mon Sep 17 00:00:00 2001
+From: D Scott Phillips <scott@os.amperecomputing.com>
+Date: Thu, 20 Mar 2025 07:45:49 -0700
+Subject: [PATCH 1/1] Fix ttbr0 emulation of dc zva
+
+The loop to emulate dc zva in the ttbr0 range was mistakenly not
+updating the address, so not actually clearing all the data in the dc
+zva access, but only the first byte.
+---
+ arch/arm64/mm/fault.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/mm/fault.c b/arch/arm64/mm/fault.c
+index ab971505d5b1..e1d7dbaf711b 100644
+--- a/arch/arm64/mm/fault.c
++++ b/arch/arm64/mm/fault.c
+@@ -708,7 +708,7 @@ static int align_dc_zva(unsigned long addr, struct pt_regs *regs)
+ 	addr &= ~(sz - 1);
+ 	if (is_ttbr0_addr(addr)) {
+ 		for (; sz; sz--) {
+-			if (align_store(addr, 1, 0))
++			if (align_store(addr++, 1, 0))
+ 				return 1;
+ 		}
+ 	} else
+-- 
+2.27.0
+

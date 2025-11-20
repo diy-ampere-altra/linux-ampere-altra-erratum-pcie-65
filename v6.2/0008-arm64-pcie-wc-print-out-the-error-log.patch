@@ -1,0 +1,31 @@
+From 20e81c0de588aba72e86735e76772c6cf0381eb8 Mon Sep 17 00:00:00 2001
+From: Huang Shijie <shijie@os.amperecomputing.com>
+Date: Tue, 4 Jul 2023 14:15:44 +0800
+Subject: [PATCH 08/10] arm64: pcie-wc: print out the error log
+
+Signed-off-by: Huang Shijie <shijie@os.amperecomputing.com>
+---
+ arch/arm64/mm/pcie_unalign_access.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/mm/pcie_unalign_access.c b/arch/arm64/mm/pcie_unalign_access.c
+index 835bbdee8882..52475f910154 100644
+--- a/arch/arm64/mm/pcie_unalign_access.c
++++ b/arch/arm64/mm/pcie_unalign_access.c
+@@ -623,8 +623,11 @@ static int align_ldst_new(u32 insn, struct pt_regs *regs)
+ 
+ 		/* Find the correct hander */
+ 		if ((f->mask & insn) == f->arm_code) {
+-			pr_debug("insn:%x, (%s)\n", insn, f->name);
+-			return f->handler(f, insn, regs);
++			int ret = f->handler(f, insn, regs);
++
++			if (ret)
++				pr_info("Failed in handling insn:%x, (%s)\n", insn, f->name);
++			return ret;
+ 		}
+ 	}
+ 
+-- 
+2.39.3
+
