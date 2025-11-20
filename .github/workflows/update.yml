@@ -1,0 +1,59 @@
+name: Update PCIE_65 patches
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  update-pcie65:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run update script
+        id: update
+        run: |
+          scripts/update.sh
+
+      - name: Push update branch
+        if: steps.update.outputs.update_mode == 'updated'
+        run: |
+          echo "Pushing branch: ${{ steps.update.outputs.branch_name }}"
+          git push origin "${{ steps.update.outputs.branch_name }}"
+
+      - name: Create issue for failed patches
+        if: steps.update.outputs.update_mode == 'updated' && steps.update.outputs.has_errors == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="${{ steps.update.outputs.branch_name }}"
+          NEXT_TAG="${{ steps.update.outputs.next_tag }}"
+          NEXT_DIR="${{ steps.update.outputs.next_dir }}"
+          CURRENT_DIR="${{ steps.update.outputs.current_dir }}"
+          FAILED="${{ steps.update.outputs.failed_patches }}"
+
+          FAILED_LIST="$(echo "$FAILED" | tr ',' '\n' | sed 's/^/- /')"
+
+          TITLE="Updating patches failed for ${NEXT_TAG}"
+          BODY=$(cat <<-EOF
+          The following patches failed to apply (even with \`git apply --reject --whitespace=fix\`):
+
+          ${FAILED_LIST}
+
+          Please inspect \`${BRANCH}\` and adjust these patches manually.
+          EOF
+          )
+
+          gh issue create \
+            --title "${TITLE}" \
+            --body "${BODY}" \
+            --label "automation"
